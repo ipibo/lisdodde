@@ -4,18 +4,19 @@
 const NEARL = 6
 const FARL = 40
 const STEP = 0.12
-const MAX_N = 4000
+const MAX_N = 1200
 const SPEED = 1
 const TUBE_R = 2 // 4mm tube diameter (2mm radius)
-const TUBE_SIDES = 8 // smoother cross-section
+const TUBE_SIDES = 10 // base cross-section resolution
 const TUBE_R_MIN = 0.5
 const TUBE_R_MAX = 30
 const TUBE_R_STEP = 0.25
-const NUM_LINES = 7 // multiple tubes for fuller cattail effect
+const NUM_LINES = 1 // fewer tubes for a cleaner silhouette
 
 let pillH, pillR // set in setup() from canvas size
 let tubeRadius = TUBE_R
 let dlines = [] // array of multiple line structures
+let isPaused = false
 
 // ---------------------------------------------------------------------------
 // Math helpers
@@ -101,7 +102,7 @@ class DifferentialLine3D {
 
   _init() {
     const ry = min(width, height) * 0.24
-    const count = 60
+    const count = 28
     // Stagger starting positions slightly for multiple tube effect
     const offsetX = random(
       -min(width, height) * 0.02,
@@ -220,7 +221,7 @@ class DifferentialLine3D {
         edz = this.z[j] - this.z[i]
       const edl = sqrt(edx * edx + edy * edy + edz * edz)
       const curv = max(this._curvature(i), this._curvature(j))
-      if ((edl > NEARL * 2.5 && curv > 0.08) || edl > NEARL * 4) {
+      if ((edl > NEARL * 3.2 && curv > 0.14) || edl > NEARL * 5) {
         nx.push(this.x[i] + edx * 0.5 + random(-0.5, 0.5))
         ny.push(this.y[i] + edy * 0.5 + random(-0.5, 0.5))
         nz.push(this.z[i] + edz * 0.5 + random(-0.5, 0.5))
@@ -235,29 +236,52 @@ class DifferentialLine3D {
 // ---------------------------------------------------------------------------
 // Tube renderer — builds a mesh around the line path each frame
 // ---------------------------------------------------------------------------
-function drawTube(dl, r = tubeRadius) {
-  const n = dl.n,
-    S = TUBE_SIDES
+function getTubeSideCount(r) {
+  const target = Math.max(TUBE_SIDES, Math.ceil(r * 1.6))
+  return Math.min(24, target + (target % 2))
+}
 
-  // Per-node tangents
-  const T = new Array(n)
+function getRenderPath(dl) {
+  const n = dl.n
+  const path = new Array(n)
+
   for (let i = 0; i < n; i++) {
-    const p = (i - 1 + n) % n,
-      nx = (i + 1) % n
-    T[i] = vnorm([dl.x[nx] - dl.x[p], dl.y[nx] - dl.y[p], dl.z[nx] - dl.z[p]])
+    const p = (i - 1 + n) % n
+    const nx = (i + 1) % n
+    path[i] = [
+      dl.x[p] * 0.2 + dl.x[i] * 0.6 + dl.x[nx] * 0.2,
+      dl.y[p] * 0.2 + dl.y[i] * 0.6 + dl.y[nx] * 0.2,
+      dl.z[p] * 0.2 + dl.z[i] * 0.6 + dl.z[nx] * 0.2,
+    ]
   }
 
-  // Initial normal — Gram-Schmidt vs T[0]
+  return path
+}
+
+function buildTubeGeometry(dl, r = tubeRadius) {
+  const path = getRenderPath(dl)
+  const n = path.length
+  const S = getTubeSideCount(r)
+
+  const T = new Array(n)
+  for (let i = 0; i < n; i++) {
+    const p = (i - 1 + n) % n
+    const nx = (i + 1) % n
+    T[i] = vnorm([
+      path[nx][0] - path[p][0],
+      path[nx][1] - path[p][1],
+      path[nx][2] - path[p][2],
+    ])
+  }
+
   let N = Math.abs(T[0][1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]
   const d0 = N[0] * T[0][0] + N[1] * T[0][1] + N[2] * T[0][2]
   N = vnorm([N[0] - d0 * T[0][0], N[1] - d0 * T[0][1], N[2] - d0 * T[0][2]])
 
-  // Ring positions and outward normals
-  const pos = new Array(n) // pos[i][s] = [x,y,z]
-  const nrm = new Array(n) // nrm[i][s] = [nx,ny,nz]
+  const pos = new Array(n)
+  const nrm = new Array(n)
 
   for (let i = 0; i < n; i++) {
-    // Keep an orthonormal frame per node; this avoids frame collapse flicker.
     let B = vcross(T[i], N)
     if (vlen2(B) < 1e-8) {
       const up = Math.abs(T[i][1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]
@@ -269,17 +293,29 @@ function drawTube(dl, r = tubeRadius) {
     pos[i] = new Array(S)
     nrm[i] = new Array(S)
     for (let s = 0; s < S; s++) {
-      const a = (TWO_PI / S) * s,
-        ca = Math.cos(a),
-        sa = Math.sin(a)
-      const nx = ca * N[0] + sa * B[0],
-        ny = ca * N[1] + sa * B[1],
-        nz = ca * N[2] + sa * B[2]
-      pos[i][s] = [dl.x[i] + r * nx, dl.y[i] + r * ny, dl.z[i] + r * nz]
+      const a = (TWO_PI / S) * s
+      const ca = Math.cos(a)
+      const sa = Math.sin(a)
+      const nx = ca * N[0] + sa * B[0]
+      const ny = ca * N[1] + sa * B[1]
+      const nz = ca * N[2] + sa * B[2]
+      pos[i][s] = [
+        path[i][0] + r * nx,
+        path[i][1] + r * ny,
+        path[i][2] + r * nz,
+      ]
       nrm[i][s] = [nx, ny, nz]
     }
+
     if (i < n - 1) N = ptransport(N, T[i], T[(i + 1) % n])
   }
+
+  return { pos, nrm, sides: S }
+}
+
+function drawTube(dl, r = tubeRadius) {
+  const { pos, nrm, sides: S } = buildTubeGeometry(dl, r)
+  const n = pos.length
 
   // Draw one TRIANGLE_STRIP per face around the tube
   noStroke()
@@ -303,40 +339,13 @@ function drawTube(dl, r = tubeRadius) {
 }
 
 function buildTubeMesh(dl, r = tubeRadius) {
-  const n = dl.n
-  const S = TUBE_SIDES
-  const T = new Array(n)
-  for (let i = 0; i < n; i++) {
-    const p = (i - 1 + n) % n
-    const nx = (i + 1) % n
-    T[i] = vnorm([dl.x[nx] - dl.x[p], dl.y[nx] - dl.y[p], dl.z[nx] - dl.z[p]])
-  }
-
-  let N = Math.abs(T[0][1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]
-  const d0 = N[0] * T[0][0] + N[1] * T[0][1] + N[2] * T[0][2]
-  N = vnorm([N[0] - d0 * T[0][0], N[1] - d0 * T[0][1], N[2] - d0 * T[0][2]])
-
+  const { pos, sides: S } = buildTubeGeometry(dl, r)
+  const n = pos.length
   const vertices = []
   for (let i = 0; i < n; i++) {
-    let B = vcross(T[i], N)
-    if (vlen2(B) < 1e-8) {
-      const up = Math.abs(T[i][1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]
-      B = vcross(T[i], up)
-    }
-    B = vnorm(B)
-    N = vnorm(vcross(B, T[i]))
-
     for (let s = 0; s < S; s++) {
-      const a = (TWO_PI / S) * s
-      const ca = Math.cos(a)
-      const sa = Math.sin(a)
-      const nx = ca * N[0] + sa * B[0]
-      const ny = ca * N[1] + sa * B[1]
-      const nz = ca * N[2] + sa * B[2]
-      vertices.push([dl.x[i] + r * nx, dl.y[i] + r * ny, dl.z[i] + r * nz])
+      vertices.push(pos[i][s])
     }
-
-    if (i < n - 1) N = ptransport(N, T[i], T[(i + 1) % n])
   }
 
   const faces = []
@@ -419,19 +428,26 @@ function setup() {
 function draw() {
   background(10, 10, 10)
 
+  // Keep apparent tube thickness uniform by removing perspective depth scaling.
+  const halfW = width * 0.5
+  const halfH = height * 0.5
+  ortho(-halfW, halfW, -halfH, halfH, -5000, 5000)
+
   ambientLight(50)
   directionalLight(255, 245, 220, 0.4, 0.8, -0.6)
   directionalLight(60, 80, 120, -0.4, -0.8, 0.6)
 
   orbitControl(2, 2, 0.05)
-  autoAngle += 0.004
+  if (!isPaused) autoAngle += 0.004
   rotateY(autoAngle)
   rotateX(0.25)
 
-  for (let i = 0; i < SPEED; i++) {
-    for (let dl of dlines) {
-      dl.optimize()
-      dl.spawn()
+  if (!isPaused) {
+    for (let i = 0; i < SPEED; i++) {
+      for (let dl of dlines) {
+        dl.optimize()
+        dl.spawn()
+      }
     }
   }
 
@@ -442,11 +458,17 @@ function draw() {
 
 function keyPressed() {
   if (key === " ") {
+    isPaused = !isPaused
+    return
+  }
+
+  if (key === "r" || key === "R") {
     dlines = []
     for (let i = 0; i < NUM_LINES; i++) {
       dlines.push(new DifferentialLine3D())
     }
     autoAngle = 0
+    isPaused = false
     return
   }
 
